@@ -1,0 +1,5 @@
+fastapi>=0.115.0,<1
+uvicorn[standard]>=0.32.0,<1
+pydantic-settings>=2.6.0,<3
+structlog>=24.4.0,<26
+python-multipart>=0.0.9,<1
