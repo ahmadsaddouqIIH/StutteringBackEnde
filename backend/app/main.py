@@ -13,6 +13,11 @@ from fastapi.responses import JSONResponse
 
 from backend.api.routes import health, router
 from backend.app.config import Settings, get_settings
+from backend.app.middleware import (
+    RequestLoggingMiddleware,
+    build_error_payload,
+    register_exception_handlers,
+)
 from backend.services.model_service import ModelService
 
 logger = structlog.get_logger(__name__)
@@ -62,15 +67,15 @@ async def lifespan(app: FastAPI):
     settings = getattr(app.state, "settings", None) or get_settings()
     log = structlog.get_logger(__name__)
     log.info("app_startup", production_mode=settings.PRODUCTION_MODE)
-    model_service = ModelService(settings)
     try:
+        model_service = ModelService(settings)
         await model_service.load()
     except Exception:
         log.exception("model_load_failed")
         raise
     app.state.model_service = model_service
     app.state.service_version = settings.SERVICE_VERSION
-    log.info("model_ready", loaded=model_service.is_loaded)
+    log.info("model_ready", loaded=model_service.is_loaded())
     yield
     model_service.shutdown()
     app.state.model_service = None
@@ -98,6 +103,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    app.add_middleware(RequestLoggingMiddleware)
+    register_exception_handlers(app)
     app.include_router(router, prefix="/api/v1")
     app.add_api_route("/health", health, methods=["GET"], include_in_schema=True)
 
@@ -106,14 +113,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         log = structlog.get_logger(__name__)
         log.exception("runtime_error", path=request.url.path)
         current = get_settings()
-        detail = "" if current.PRODUCTION_MODE else str(exc)
         return JSONResponse(
             status_code=500,
-            content={
-                "error_code": "MODEL_ERROR",
-                "message": "Inference or model operation failed",
-                "detail": detail,
-            },
+            content=build_error_payload(
+                request,
+                error_code="MODEL_ERROR",
+                message="Inference or model operation failed",
+                detail=str(exc) if not current.PRODUCTION_MODE else "",
+            )
         )
 
     return app

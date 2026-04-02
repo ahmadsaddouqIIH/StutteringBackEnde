@@ -13,6 +13,7 @@ from pydantic import ValidationError
 
 from backend.app.config import Settings, clear_settings_cache, get_settings
 from backend.app.main import create_app
+from backend.services.model_service import ModelNotLoadedError, ModelService
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -32,6 +33,31 @@ def _minimal_dev_settings(**overrides) -> Settings:
     )
     base.update(overrides)
     return Settings(**base)
+
+
+def _write_minimal_artifacts(base_dir: Path) -> Path:
+    artifact_dir = base_dir / "foundation_artifacts"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    (artifact_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "model_name": "facebook/wav2vec2-base-960h",
+                "model_version": "0.0.0-test",
+                "sample_rate": 16000,
+                "max_samples": 16000,
+                "class_names": [
+                    "Fluent",
+                    "Blocks",
+                    "Prolongations",
+                    "Repetitions",
+                    "Interjections",
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (artifact_dir / "model_inference.pt").write_bytes(b"placeholder")
+    return artifact_dir
 
 
 @pytest.fixture(autouse=True)
@@ -85,7 +111,7 @@ class TestRequirementsChecklist:
         app = create_app(settings)
         with TestClient(app) as client:
             assert client.app.state.model_service is not None
-            assert client.app.state.model_service.is_loaded is True
+            assert client.app.state.model_service.is_loaded() is True
             client.get("/health")
         assert app.state.model_service is None
 
@@ -106,8 +132,11 @@ class TestRequirementsChecklist:
         assert "detail" in data
         assert data["detail"] == "deliberate"
 
-    def test_runtime_error_hides_detail_in_production_mode(self, monkeypatch) -> None:
-        settings = _minimal_dev_settings(PRODUCTION_MODE=True, MODEL_PATH=__file__)
+    def test_runtime_error_hides_detail_in_production_mode(self, monkeypatch, tmp_path) -> None:
+        artifact_dir = _write_minimal_artifacts(tmp_path)
+        monkeypatch.setattr(ModelService, "_load_processor", lambda self, cfg: object())
+        monkeypatch.setattr(ModelService, "_load_model", lambda self, model_path, cfg: object())
+        settings = _minimal_dev_settings(PRODUCTION_MODE=True, MODEL_PATH=str(artifact_dir))
         app = create_app(settings)
 
         @app.get("/trigger-runtime-error")
@@ -120,7 +149,7 @@ class TestRequirementsChecklist:
         with TestClient(app) as client:
             r = client.get("/trigger-runtime-error")
         assert r.status_code == 500
-        assert r.json()["detail"] == ""
+        assert "detail" not in r.json()
 
     def test_cors_uses_config_origins(self) -> None:
         settings = _minimal_dev_settings(
@@ -184,7 +213,7 @@ class TestRequirementsChecklist:
             MODEL_PATH=str(PROJECT_ROOT / "nonexistent_model_artifact.bin"),
         )
         app = create_app(settings)
-        with pytest.raises(FileNotFoundError):
+        with pytest.raises(ModelNotLoadedError):
             with TestClient(app):
                 pass
 
